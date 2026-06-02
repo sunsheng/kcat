@@ -1,0 +1,213 @@
+name: Windows MSI Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_package:
+        description: Publish the generated MSI NuGet package to GitHub Packages
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-msi:
+    name: Build Windows MSI
+    runs-on: windows-2022
+
+    env:
+      CONFIGURATION: Release
+      PLATFORM: x64
+      PACKAGE_ID: kcat.windows.msi
+      WIX_VERSION: 5.0.2
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+        with:
+          vs-version: '[17.0,18.0)'
+
+      - name: Set up NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Resolve package version
+        id: version
+        shell: pwsh
+        run: |
+          if ('${{ github.ref_type }}' -eq 'tag' -and '${{ github.ref_name }}' -match '^v?(.+)$') {
+            $version = $Matches[1]
+          } else {
+            $version = "0.0.0-ci.${{ github.run_number }}"
+          }
+
+          if ($version -notmatch '^([0-9]+\.[0-9]+\.[0-9]+)([-.][0-9A-Za-z.-]+)?$') {
+            throw "Version '$version' is not a valid NuGet package version. Use a SemVer tag such as v1.7.1."
+          }
+          $msiVersion = $Matches[1]
+
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "msi_version=$msiVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "msi_name=kcat-$version-windows-$env:PLATFORM.msi" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "nupkg_name=$env:PACKAGE_ID.$version.nupkg" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Restore NuGet packages
+        shell: pwsh
+        run: nuget restore win32\kcat.sln -PackagesDirectory win32\packages
+
+      - name: Show MSBuild environment
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest `
+            -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          msbuild -version
+
+      - name: Build kcat for Windows
+        shell: pwsh
+        run: |
+          msbuild win32\kcat.sln `
+            /m `
+            /p:Configuration=$env:CONFIGURATION `
+            /p:Platform=$env:PLATFORM `
+            /p:PlatformToolset=v143 `
+            /p:PreferredToolArchitecture=x64
+
+      - name: Stage installer payload
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'artifacts\stage'
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+
+          $exe = Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE 'win32') -Filter 'kcat.exe' -Recurse |
+            Where-Object { $_.FullName -match "\\$env:CONFIGURATION\\" } |
+            Select-Object -First 1
+          if (-not $exe) {
+            throw "Could not find kcat.exe under win32 after the MSBuild step."
+          }
+
+          Copy-Item -Path (Join-Path $exe.DirectoryName '*') -Destination $stage -Recurse -Force
+          Copy-Item -Path README.md,LICENSE -Destination $stage -Force
+
+          Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE 'win32\packages') -Filter '*.dll' -Recurse |
+            Where-Object { $_.FullName -match '(win-x64|x64)' } |
+            ForEach-Object {
+              $destination = Join-Path $stage $_.Name
+              if (-not (Test-Path $destination)) {
+                Copy-Item -Path $_.FullName -Destination $destination -Force
+              }
+            }
+
+          Get-ChildItem -Path $stage -File | Sort-Object Name | Format-Table Name,Length
+
+      - name: Generate WiX source
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'artifacts\stage'
+          $wix = Join-Path $env:GITHUB_WORKSPACE 'artifacts\kcat.wxs'
+          $version = '${{ steps.version.outputs.msi_version }}'
+          $upgradeCode = '8f6a0b75-54b9-4b8a-8e21-a63962a03610'
+
+          $components = New-Object System.Collections.Generic.List[string]
+          $componentRefs = New-Object System.Collections.Generic.List[string]
+          $index = 0
+          Get-ChildItem -Path $stage -File | Sort-Object Name | ForEach-Object {
+            $index++
+            $componentId = 'PayloadComponent' + $index
+            $fileId = 'PayloadFile' + $index
+            $source = [System.Security.SecurityElement]::Escape($_.FullName)
+            $components.Add("        <Component Id=`"$componentId`" Guid=`"*`">")
+            $components.Add("          <File Id=`"$fileId`" Source=`"$source`" KeyPath=`"yes`" />")
+            $components.Add('        </Component>')
+            $componentRefs.Add("      <ComponentRef Id=`"$componentId`" />")
+          }
+
+          @"
+          <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+            <Package Name="kcat" Manufacturer="edenhill" Version="$version" UpgradeCode="$upgradeCode" Scope="perMachine">
+              <MajorUpgrade DowngradeErrorMessage="A newer version of kcat is already installed." />
+              <MediaTemplate EmbedCab="yes" />
+              <StandardDirectory Id="ProgramFiles64Folder">
+                <Directory Id="INSTALLFOLDER" Name="kcat">
+          $($components -join "`r`n")
+                </Directory>
+              </StandardDirectory>
+              <Feature Id="DefaultFeature" Title="kcat" Level="1">
+          $($componentRefs -join "`r`n")
+              </Feature>
+            </Package>
+          </Wix>
+          "@ | Set-Content -Path $wix -Encoding utf8
+
+          Get-Content $wix
+
+      - name: Build MSI installer
+        shell: pwsh
+        run: |
+          $toolPath = Join-Path $env:RUNNER_TEMP 'wix'
+          dotnet tool install wix --version $env:WIX_VERSION --tool-path $toolPath
+          $wix = Join-Path $toolPath 'wix.exe'
+          & $wix --version
+          & $wix build artifacts\kcat.wxs -o "artifacts\${{ steps.version.outputs.msi_name }}"
+
+      - name: Create NuGet package for GitHub Packages
+        shell: pwsh
+        run: |
+          $packageRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts\nuget\contentFiles\any\any'
+          New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
+          Copy-Item "artifacts\${{ steps.version.outputs.msi_name }}" -Destination $packageRoot -Force
+
+          $nuspec = Join-Path $env:GITHUB_WORKSPACE 'artifacts\kcat.windows.msi.nuspec'
+          @"
+          <?xml version="1.0" encoding="utf-8"?>
+          <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+            <metadata>
+              <id>$env:PACKAGE_ID</id>
+              <version>${{ steps.version.outputs.version }}</version>
+              <authors>edenhill</authors>
+              <owners>edenhill</owners>
+              <description>Windows MSI installer package for kcat.</description>
+              <projectUrl>https://github.com/${{ github.repository }}</projectUrl>
+              <license type="expression">BSD-2-Clause</license>
+            </metadata>
+            <files>
+              <file src="contentFiles\any\any\${{ steps.version.outputs.msi_name }}" target="contentFiles\any\any" />
+            </files>
+          </package>
+          "@ | Set-Content -Path $nuspec -Encoding utf8
+
+          nuget pack $nuspec -BasePath artifacts\nuget -OutputDirectory artifacts
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kcat-windows-msi-${{ steps.version.outputs.version }}
+          path: |
+            artifacts/${{ steps.version.outputs.msi_name }}
+            artifacts/${{ steps.version.outputs.nupkg_name }}
+
+      - name: Publish NuGet package to GitHub Packages
+        if: ${{ github.ref_type == 'tag' || inputs.publish_package }}
+        shell: pwsh
+        run: |
+          dotnet nuget push "artifacts\${{ steps.version.outputs.nupkg_name }}" `
+            --api-key ${{ secrets.GITHUB_TOKEN }} `
+            --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" `
+            --skip-duplicate
+
+      - name: Publish MSI to GitHub Release
+        if: ${{ github.ref_type == 'tag' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/${{ steps.version.outputs.msi_name }}
+            artifacts/${{ steps.version.outputs.nupkg_name }}

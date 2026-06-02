@@ -106,9 +106,20 @@ On Ubuntu or Debian: `sudo apt-get install librdkafka-dev libyajl-dev`
 
     cd win32
     nuget restore
-    msbuild
+    msbuild /p:Configuration=Release /p:Platform=x64
 
-**NOTE**: Requires `Build Tools for Visual Studio 2017` with components `Windows 8.1 SDK` and `VC++ 2015.3 v14.00 (v140) toolset` to be installed.
+**NOTE**: Local Windows builds require Visual Studio Build Tools with the C++
+toolchain and a Windows SDK installed. The GitHub Actions Windows MSI workflow
+uses Visual Studio 2022 on the `windows-2022` runner and builds the x64 Release
+configuration before packaging the executable into an MSI.
+
+### Windows MSI package workflow
+
+The `.github/workflows/windows-msi.yml` workflow can be run manually from
+GitHub Actions or automatically by pushing a `v*` tag. Each run uploads the MSI
+and its NuGet package as workflow artifacts. Tagged runs also publish those
+assets to the GitHub Release, and tagged runs or manual runs with
+`publish_package` enabled publish the NuGet package to GitHub Packages.
 
 ## Quick build
 
