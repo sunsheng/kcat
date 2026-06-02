@@ -1,3 +1,77 @@
+
+Create GitHub Action for Windows MSI build
+6月2日
+·
+sunsheng/kcat
+·
+master
+
+归档
+
+分享
+查看 PR
+
+
+1
+创建github action， 编译windows 程序， 并生成msi 安装包，并发布到package
+复制
+Summary
+新增 GitHub Actions 工作流 Windows MSI Package，支持手动触发以及 v* tag 触发，并配置 contents: write 与 packages: write 权限用于发布 Release 资产和 GitHub Packages。提交：78c53e5。
+
+工作流会在 windows-latest 上设置 MSBuild/NuGet，解析 SemVer 版本号，然后通过 nuget restore 与 msbuild 编译 Windows x64 Release 程序。
+
+工作流会收集 kcat.exe、README/LICENSE 以及 NuGet 恢复出的 x64 DLL 依赖作为安装包 payload。
+
+工作流会动态生成 WiX .wxs 文件，并安装 WiX CLI 构建 .msi 安装包。
+
+工作流会把 MSI 打入 .nupkg，上传 workflow artifacts；tag 构建或手动勾选发布时推送到 GitHub Packages，tag 构建还会把 MSI/NuGet 包发布到 GitHub Release。
+
+Testing
+
+✅ git diff --check -- .github/workflows/windows-msi.yml
+
+✅ ruby -e "require 'yaml'; data=YAML.load_file('.github/workflows/windows-msi.yml'); puts data.keys.map(&:to_s).sort.join(','); puts data['jobs'].keys.join(',')"
+
+⚠️ GOBIN=/tmp/kcat-tools go install github.com/rhysd/actionlint/cmd/actionlint@latest && /tmp/kcat-tools/actionlint .github/workflows/windows-msi.yml（环境限制：Go proxy 返回 Forbidden，无法下载 actionlint）
+
+
+文件 (1)
+构建失败 https://github.com/sunsheng/kcat/actions/runs/26813699802/job/79049975353#step:7:1
+复制
+Summary
+已修复 Windows 构建失败的关键风险：不再使用会漂移到新版镜像的 windows-latest，改为固定 windows-2022，让构建环境稳定在 Visual Studio 2022。并设置 Node 24 兼容环境变量。提交：58de1db。
+
+MSBuild 步骤现在显式选择 Visual Studio 2022 版本范围 [17.0,18.0)，避免跑到 VS2026/Windows 2025 镜像后找不到旧工具链或工具链不匹配的问题。
+
+新增 Show MSBuild environment 诊断步骤，会在真正编译前输出 vswhere 选中的 VS 安装路径和 msbuild -version，方便以后再失败时快速定位环境问题。
+
+Build kcat for Windows 现在显式使用 PlatformToolset=v143 和 x64 MSBuild tool architecture，避免原项目里的 v142 在新版 GitHub runner 上不可用导致构建失败。
+
+保留 MSI 生成、NuGet 包创建、Artifact 上传、GitHub Packages 发布和 tag Release 发布流程；同时把 checkout/artifact 上传 action 更新到 Node 24 兼容主版本。
+
+Testing
+
+✅ git diff --check -- .github/workflows/windows-msi.yml
+
+✅ ruby -e "require 'yaml'; data=YAML.load_file('.github/workflows/windows-msi.yml'); puts data.keys.map(&:to_s).sort.join(','); puts data['jobs'].keys.join(',')"
+
+⚠️ GOBIN=/tmp/kcat-tools GOPROXY=direct go install github.com/rhysd/actionlint/cmd/actionlint@latest && /tmp/kcat-tools/actionlint .github/workflows/windows-msi.yml（环境限制：当前容器访问 GitHub 直接连接时 CONNECT tunnel 返回 403，无法下载 actionlint）
+
+
+文件 (1)
+有冲突， 刚才的pr已经合并了
+复制
+
+
+差异
+日志
+
+.github/workflows/windows-msi.yml
+.github/workflows/windows-msi.yml
+新
++210
+-0
+
 name: Windows MSI Package
 
 on:
