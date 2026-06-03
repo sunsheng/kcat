@@ -37,7 +37,13 @@
 #include "rdport.h"
 
 #ifdef _MSC_VER
+#ifndef LIBRDKAFKA_STATICLINK
+/* Dynamic build: pull in the librdkafka import library.
+ * For static builds the librdkafka static lib (and all of its
+ * transitive dependencies) are passed explicitly on the linker
+ * command line, so this auto-link pragma must be disabled. */
 #pragma comment(lib, "librdkafka.lib")
+#endif
 #include "win32/win32_config.h"
 #else
 #include "config.h"

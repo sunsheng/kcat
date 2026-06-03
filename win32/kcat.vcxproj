@@ -103,13 +103,32 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;LIBRDKAFKA_STATICLINK;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <AdditionalIncludeDirectories>$(KcatRdkafkaInclude);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
+    <Link>
+      <TargetMachine>MachineX64</TargetMachine>
+      <SubSystem>Console</SubSystem>
+      <AdditionalLibraryDirectories>$(KcatRdkafkaLibDirs);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>$(KcatRdkafkaLibs);%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;LIBRDKAFKA_STATICLINK;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <WarningLevel>Level3</WarningLevel>
+      <AdditionalIncludeDirectories>$(KcatRdkafkaInclude);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
+    <Link>
+      <TargetMachine>MachineX64</TargetMachine>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <AdditionalLibraryDirectories>$(KcatRdkafkaLibDirs);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>$(KcatRdkafkaLibs);%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="..\kcat.h" />
@@ -126,17 +145,7 @@
     <ClCompile Include="getdelim.c" />
     <ClCompile Include="wingetopt.c" />
   </ItemGroup>
-  <ItemGroup>
-    <None Include="packages.config" />
-  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
-    <Import Project="packages\librdkafka.redist.1.8.2\build\native\librdkafka.redist.targets" Condition="Exists('packages\librdkafka.redist.1.8.2\build\native\librdkafka.redist.targets')" />
   </ImportGroup>
-  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
-    <PropertyGroup>
-      <ErrorText>This project references NuGet package(s) that are missing on this computer. Use NuGet Package Restore to download them.  For more information, see http://go.microsoft.com/fwlink/?LinkID=322105. The missing file is {0}.</ErrorText>
-    </PropertyGroup>
-    <Error Condition="!Exists('packages\librdkafka.redist.1.8.2\build\native\librdkafka.redist.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\librdkafka.redist.1.8.2\build\native\librdkafka.redist.targets'))" />
-  </Target>
 </Project>

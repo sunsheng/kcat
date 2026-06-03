@@ -11,12 +11,14 @@ permissions:
 
 jobs:
   build:
-    name: Build Windows kcat.zip
+    name: Build static Windows kcat.exe
     runs-on: windows-2022
 
     env:
       CONFIGURATION: Release
       PLATFORM: x64
+      VCPKG_TRIPLET: x64-windows-static
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg_cache
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
@@ -27,9 +29,6 @@ jobs:
         uses: microsoft/setup-msbuild@v2
         with:
           vs-version: '[17.0,18.0)'
-
-      - name: Set up NuGet
-        uses: NuGet/setup-nuget@v2
 
       - name: Resolve version
         id: version
@@ -44,11 +43,52 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "zip_name=kcat-$version-windows-$env:PLATFORM.zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Restore NuGet packages
-        shell: pwsh
-        run: nuget restore win32\kcat.sln -PackagesDirectory win32\packages
+      # Cache the compiled vcpkg packages (librdkafka + openssl/zlib/zstd) so the
+      # expensive static build only happens once across runs.
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-${{ env.VCPKG_TRIPLET }}-librdkafka-ssl-zlib-zstd-v1
 
-      - name: Build kcat for Windows
+      - name: Install static librdkafka via vcpkg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          $vcpkg = Join-Path $env:VCPKG_INSTALLATION_ROOT 'vcpkg.exe'
+          & $vcpkg install `
+            "librdkafka[core,ssl,zlib,zstd]:$env:VCPKG_TRIPLET" `
+            "pkgconf:$env:VCPKG_TRIPLET"
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed ($LASTEXITCODE)" }
+
+      # Derive the complete transitive static link line (librdkafka + openssl +
+      # zlib + zstd + all Win32 system libs) straight from librdkafka's pkg-config
+      # file, so the linker inputs never drift from what vcpkg actually built.
+      - name: Compute static link flags
+        id: link
+        shell: pwsh
+        run: |
+          $inst = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed\$env:VCPKG_TRIPLET"
+          $pkgconf = Get-ChildItem -Path (Join-Path $inst 'tools') -Filter 'pkgconf.exe' -Recurse |
+            Select-Object -First 1
+          if (-not $pkgconf) { throw "pkgconf.exe not found under $inst\tools" }
+
+          $env:PKG_CONFIG_PATH = Join-Path $inst 'lib\pkgconfig'
+          $raw = & $pkgconf.FullName --msvc-syntax --static --libs-only-l rdkafka
+          if ($LASTEXITCODE -ne 0) { throw "pkgconf failed to resolve rdkafka ($LASTEXITCODE)" }
+
+          $libs = (($raw -split '\s+') | Where-Object { $_ }) -join ';'
+          if (-not $libs) { throw "pkgconf returned no libraries for rdkafka" }
+
+          $incdir = Join-Path $inst 'include'
+          $libdir = Join-Path $inst 'lib'
+
+          Write-Host "Static libraries: $libs"
+          "libs=$libs"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "libdir=$libdir" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "incdir=$incdir" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build static kcat.exe
         shell: pwsh
         run: |
           msbuild win32\kcat.sln `
@@ -56,7 +96,11 @@ jobs:
             /p:Configuration=$env:CONFIGURATION `
             /p:Platform=$env:PLATFORM `
             /p:PlatformToolset=v143 `
-            /p:PreferredToolArchitecture=x64
+            /p:PreferredToolArchitecture=x64 `
+            /p:KcatRdkafkaInclude="${{ steps.link.outputs.incdir }}" `
+            /p:KcatRdkafkaLibDirs="${{ steps.link.outputs.libdir }}" `
+            /p:KcatRdkafkaLibs="${{ steps.link.outputs.libs }}"
+          if ($LASTEXITCODE -ne 0) { throw "msbuild failed ($LASTEXITCODE)" }
 
       - name: Stage payload
         shell: pwsh
@@ -64,7 +108,8 @@ jobs:
           $stage = Join-Path $env:GITHUB_WORKSPACE 'artifacts\stage'
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
-          # kcat.exe (CRT is statically linked /MT; only librdkafka is dynamic)
+          # Fully static kcat.exe: CRT (/MT), librdkafka and all of its
+          # dependencies are linked in, so no runtime DLLs ship alongside it.
           $exe = Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE 'win32') -Filter 'kcat.exe' -Recurse |
             Where-Object { $_.FullName -match "\\$env:CONFIGURATION\\" } |
             Select-Object -First 1
@@ -73,27 +118,22 @@ jobs:
           }
           Copy-Item -Path $exe.FullName -Destination $stage -Force
 
-          # Runtime DLLs actually required by librdkafka.dll (verified by dependency test).
-          # Deliberately excludes librdkafkacpp.dll (C++ wrapper, unused) and msvcp140.dll.
-          $needed = @(
-            'librdkafka.dll',
-            'libcrypto-1_1-x64.dll',
-            'libssl-1_1-x64.dll',
-            'zlib1.dll',
-            'zstd.dll',
-            'vcruntime140.dll'
-          )
-          foreach ($name in $needed) {
-            $dll = Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE 'win32\packages') -Filter $name -Recurse |
-              Where-Object { $_.FullName -match '(win-x64|x64)' } |
-              Select-Object -First 1
-            if (-not $dll) {
-              throw "Required runtime DLL not found in packages: $name"
+          # Fail loudly if the exe still depends on any of the librdkafka DLLs
+          # we used to ship (i.e. the link silently stayed dynamic).
+          $bad = @('librdkafka.dll', 'libcrypto-1_1-x64.dll', 'libssl-1_1-x64.dll', 'zlib1.dll', 'zstd.dll')
+          $dumpbin = Get-ChildItem -Path "${env:ProgramFiles}\Microsoft Visual Studio" -Filter 'dumpbin.exe' -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if ($dumpbin) {
+            $deps = & $dumpbin.FullName /DEPENDENTS $exe.FullName
+            foreach ($name in $bad) {
+              if ($deps -match [regex]::Escape($name)) {
+                throw "kcat.exe still imports $name -- static link did not take effect."
+              }
             }
-            Copy-Item -Path $dll.FullName -Destination $stage -Force
+            Write-Host "Dependency check passed: no librdkafka runtime DLLs imported."
           }
 
-          # License kept for redistribution compliance (not needed at runtime)
+          # License kept for redistribution compliance.
           Copy-Item -Path LICENSE -Destination $stage -Force
 
           Get-ChildItem -Path $stage -File | Sort-Object Name,Length
