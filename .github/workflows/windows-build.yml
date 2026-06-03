@@ -44,9 +44,11 @@ jobs:
           "zip_name=kcat-$version-windows-$env:PLATFORM.zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       # Cache the compiled vcpkg packages (librdkafka + openssl/zlib/zstd) so the
-      # expensive static build only happens once across runs.
-      - name: Cache vcpkg binaries
-        uses: actions/cache@v4
+      # expensive static build only happens once across runs. Restore/save are
+      # split so the cache is still written when a later step fails.
+      - name: Restore vcpkg cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
           key: vcpkg-${{ env.VCPKG_TRIPLET }}-librdkafka-ssl-zlib-zstd-v1
@@ -61,30 +63,64 @@ jobs:
             "pkgconf:$env:VCPKG_TRIPLET"
           if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed ($LASTEXITCODE)" }
 
+      - name: Save vcpkg cache
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-${{ env.VCPKG_TRIPLET }}-librdkafka-ssl-zlib-zstd-v1
+
       # Derive the complete transitive static link line (librdkafka + openssl +
-      # zlib + zstd + all Win32 system libs) straight from librdkafka's pkg-config
-      # file, so the linker inputs never drift from what vcpkg actually built.
+      # zlib + zstd + all Win32 system libs). Prefer librdkafka's pkg-config file
+      # (authoritative for the exact dependency set); fall back to linking every
+      # static lib vcpkg produced plus the Win32 system libs OpenSSL/librdkafka
+      # need, so the build is resilient to pkg-config naming/layout changes.
       - name: Compute static link flags
         id: link
         shell: pwsh
         run: |
-          $inst = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed\$env:VCPKG_TRIPLET"
-          $pkgconf = Get-ChildItem -Path (Join-Path $inst 'tools') -Filter 'pkgconf.exe' -Recurse |
-            Select-Object -First 1
-          if (-not $pkgconf) { throw "pkgconf.exe not found under $inst\tools" }
-
-          $env:PKG_CONFIG_PATH = Join-Path $inst 'lib\pkgconfig'
-          $raw = & $pkgconf.FullName --msvc-syntax --static --libs-only-l rdkafka
-          if ($LASTEXITCODE -ne 0) { throw "pkgconf failed to resolve rdkafka ($LASTEXITCODE)" }
-
-          $libs = (($raw -split '\s+') | Where-Object { $_ }) -join ';'
-          if (-not $libs) { throw "pkgconf returned no libraries for rdkafka" }
-
-          $incdir = Join-Path $inst 'include'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $inst   = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed\$env:VCPKG_TRIPLET"
           $libdir = Join-Path $inst 'lib'
+          $incdir = Join-Path $inst 'include'
+          $pcdir  = Join-Path $libdir 'pkgconfig'
+
+          Write-Host "== .lib files in $libdir =="
+          Get-ChildItem $libdir -Filter *.lib -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
+          Write-Host "== .pc files in $pcdir =="
+          if (Test-Path $pcdir) { Get-ChildItem $pcdir -Filter *.pc | Select-Object -ExpandProperty Name } else { Write-Host "(no pkgconfig dir)" }
+
+          $libs = $null
+          $pkgconf = Get-ChildItem (Join-Path $inst 'tools') -Filter pkgconf.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          $pc = $null
+          if (Test-Path $pcdir) {
+            $pc = Get-ChildItem $pcdir -Filter '*.pc' |
+              Where-Object { $_.BaseName -match 'rdkafka' -and $_.BaseName -notmatch '\+\+|cpp' } |
+              Select-Object -First 1
+          }
+          if ($pkgconf -and $pc) {
+            $env:PKG_CONFIG_PATH = $pcdir
+            Write-Host "Resolving via pkgconf module '$($pc.BaseName)'"
+            $raw = & $pkgconf.FullName --msvc-syntax --static --libs-only-l $pc.BaseName 2>&1
+            if ($LASTEXITCODE -eq 0 -and $raw) {
+              $libs = (($raw -split '\s+') | Where-Object { $_ -match '\.lib$' } | Select-Object -Unique) -join ';'
+            } else {
+              Write-Host "pkgconf did not resolve cleanly: $raw"
+            }
+          }
+          if (-not $libs) {
+            Write-Host "Falling back to globbed libs + Win32 system libs"
+            $vlibs = Get-ChildItem $libdir -Filter *.lib -ErrorAction SilentlyContinue |
+              Where-Object { $_.BaseName -notmatch '\+\+|cpp' } | Select-Object -ExpandProperty Name
+            $syslibs = @('ws2_32.lib','crypt32.lib','secur32.lib','bcrypt.lib','ncrypt.lib',
+                         'advapi32.lib','user32.lib','gdi32.lib','shell32.lib','ole32.lib',
+                         'dnsapi.lib','iphlpapi.lib','normaliz.lib')
+            $libs = (($vlibs + $syslibs) | Select-Object -Unique) -join ';'
+          }
+          if (-not $libs) { throw "Could not determine static link libraries" }
 
           Write-Host "Static libraries: $libs"
-          "libs=$libs"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "libs=$libs"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "libdir=$libdir" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "incdir=$incdir" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
