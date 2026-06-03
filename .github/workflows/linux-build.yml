@@ -1,0 +1,86 @@
+name: Linux Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build self-contained Linux kcat (CentOS 7 / glibc 2.17)
+    runs-on: ubuntu-latest
+
+    env:
+      LIBRDKAFKA_VERSION: v2.6.1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            version="${{ github.ref_name }}"
+            version="${version#v}"
+          else
+            version="0.0.0-ci.${{ github.run_number }}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tarball=kcat-$version-linux-x86_64.tar.gz" >> "$GITHUB_OUTPUT"
+
+      # Cache the from-source dependency build (OpenSSL/zlib/zstd + librdkafka),
+      # which is the slow part. The build dir uses a fixed in-container path
+      # (/work), so its pkg-config/.a paths stay valid across runs.
+      - name: Cache librdkafka build
+        uses: actions/cache@v4
+        with:
+          path: tmp-linux-build
+          key: linux-static-${{ env.LIBRDKAFKA_VERSION }}-${{ hashFiles('packaging/linux/build-static.sh') }}
+
+      # Compile inside the manylinux2014 image (CentOS 7 userland, glibc 2.17):
+      # the resulting binary references no glibc symbol newer than 2.17, so it
+      # runs on CentOS 7 (kernel 3.x) and any newer distro. The checkout/upload
+      # actions stay on the modern host because their Node runtime needs a
+      # newer glibc than the old container provides.
+      - name: Build static kcat in CentOS 7 container
+        run: |
+          docker run --rm \
+            -v "$PWD":/work -w /work \
+            -e LIBRDKAFKA_VERSION="$LIBRDKAFKA_VERSION" \
+            quay.io/pypa/manylinux2014_x86_64 \
+            bash packaging/linux/build-static.sh
+          # Reclaim ownership of the root-created build outputs so later
+          # host-side steps (staging, caching) can read/write them.
+          sudo chown -R "$(id -u):$(id -g)" .
+
+      - name: Stage payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="artifacts/stage"
+          mkdir -p "$stage"
+          cp kcat "$stage/"
+          cp LICENSE "$stage/"
+          chmod +x "$stage/kcat"
+          ls -l "$stage"
+          mkdir -p artifacts
+          tar -C "$stage" -czf "artifacts/${{ steps.version.outputs.tarball }}" kcat LICENSE
+          ls -l artifacts
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: kcat-linux-${{ steps.version.outputs.version }}
+          path: artifacts/${{ steps.version.outputs.tarball }}
+
+      - name: Publish to GitHub Release
+        if: ${{ github.ref_type == 'tag' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/${{ steps.version.outputs.tarball }}

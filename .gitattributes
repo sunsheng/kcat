@@ -1,0 +1,4 @@
+# Shell scripts must keep LF endings so they run inside Linux build containers.
+*.sh text eol=lf
+bootstrap.sh text eol=lf
+configure text eol=lf
