@@ -95,17 +95,17 @@ jobs:
           $libs = (($vlibs + $syslibs) | Select-Object -Unique) -join ';'
           Write-Host "Static libraries: $libs"
 
-          $props = @"
-<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <PropertyGroup>
-    <KcatRdkafkaInclude>$incdir</KcatRdkafkaInclude>
-    <KcatRdkafkaLibDirs>$libdir</KcatRdkafkaLibDirs>
-    <KcatRdkafkaLibs>$libs</KcatRdkafkaLibs>
-  </PropertyGroup>
-</Project>
-"@
+          $lines = @(
+            '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">'
+            '  <PropertyGroup>'
+            "    <KcatRdkafkaInclude>$incdir</KcatRdkafkaInclude>"
+            "    <KcatRdkafkaLibDirs>$libdir</KcatRdkafkaLibDirs>"
+            "    <KcatRdkafkaLibs>$libs</KcatRdkafkaLibs>"
+            '  </PropertyGroup>'
+            '</Project>'
+          )
           $propsPath = Join-Path $env:GITHUB_WORKSPACE 'win32\kcat.link.props'
-          Set-Content -Path $propsPath -Value $props -Encoding UTF8
+          Set-Content -Path $propsPath -Value $lines -Encoding UTF8
           Write-Host "Wrote $propsPath"
           Get-Content $propsPath
 
