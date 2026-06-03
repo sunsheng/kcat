@@ -51,14 +51,14 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: vcpkg-${{ env.VCPKG_TRIPLET }}-librdkafka-ssl-zlib-zstd-v1
+          key: vcpkg-${{ env.VCPKG_TRIPLET }}-librdkafka-ssl-zlib-zstd-snappy-v2
 
       - name: Install static librdkafka via vcpkg
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
           $vcpkg = Join-Path $env:VCPKG_INSTALLATION_ROOT 'vcpkg.exe'
-          & $vcpkg install "librdkafka[core,ssl,zlib,zstd]:$env:VCPKG_TRIPLET"
+          & $vcpkg install "librdkafka[core,ssl,zlib,zstd,snappy]:$env:VCPKG_TRIPLET"
           if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed ($LASTEXITCODE)" }
 
       - name: Save vcpkg cache
@@ -66,7 +66,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: vcpkg-${{ env.VCPKG_TRIPLET }}-librdkafka-ssl-zlib-zstd-v1
+          key: vcpkg-${{ env.VCPKG_TRIPLET }}-librdkafka-ssl-zlib-zstd-snappy-v2
 
       # Build the static link line by listing every static lib vcpkg produced
       # (librdkafka + openssl + zlib + zstd + lz4) plus the Win32 system libs

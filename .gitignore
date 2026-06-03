@@ -13,3 +13,5 @@ core
 core.*
 vgcore.*
 .idea
+
+.claude/scheduled_tasks.lock
