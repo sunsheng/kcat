@@ -64,24 +64,37 @@ jobs:
           $stage = Join-Path $env:GITHUB_WORKSPACE 'artifacts\stage'
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
+          # kcat.exe (CRT is statically linked /MT; only librdkafka is dynamic)
           $exe = Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE 'win32') -Filter 'kcat.exe' -Recurse |
             Where-Object { $_.FullName -match "\\$env:CONFIGURATION\\" } |
             Select-Object -First 1
           if (-not $exe) {
             throw "Could not find kcat.exe under win32 after the MSBuild step."
           }
+          Copy-Item -Path $exe.FullName -Destination $stage -Force
 
-          Copy-Item -Path (Join-Path $exe.DirectoryName '*') -Destination $stage -Recurse -Force
-          Copy-Item -Path README.md,LICENSE -Destination $stage -Force
-
-          Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE 'win32\packages') -Filter '*.dll' -Recurse |
-            Where-Object { $_.FullName -match '(win-x64|x64)' } |
-            ForEach-Object {
-              $destination = Join-Path $stage $_.Name
-              if (-not (Test-Path $destination)) {
-                Copy-Item -Path $_.FullName -Destination $destination -Force
-              }
+          # Runtime DLLs actually required by librdkafka.dll (verified by dependency test).
+          # Deliberately excludes librdkafkacpp.dll (C++ wrapper, unused) and msvcp140.dll.
+          $needed = @(
+            'librdkafka.dll',
+            'libcrypto-1_1-x64.dll',
+            'libssl-1_1-x64.dll',
+            'zlib1.dll',
+            'zstd.dll',
+            'vcruntime140.dll'
+          )
+          foreach ($name in $needed) {
+            $dll = Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE 'win32\packages') -Filter $name -Recurse |
+              Where-Object { $_.FullName -match '(win-x64|x64)' } |
+              Select-Object -First 1
+            if (-not $dll) {
+              throw "Required runtime DLL not found in packages: $name"
             }
+            Copy-Item -Path $dll.FullName -Destination $stage -Force
+          }
+
+          # License kept for redistribution compliance (not needed at runtime)
+          Copy-Item -Path LICENSE -Destination $stage -Force
 
           Get-ChildItem -Path $stage -File | Sort-Object Name,Length
 
