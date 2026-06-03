@@ -24,6 +24,15 @@ JOBS="$(nproc 2>/dev/null || echo 2)"
 
 mkdir -p "$WORK" "$DEST"
 
+# When run as root in the CentOS 7 build container, install the tools mklove
+# needs to fetch and build the source dependencies: wget (mklove's downloader)
+# and the Perl modules OpenSSL's Configure relies on (IPC::Cmd, Data::Dumper).
+if [[ "$(id -u)" -eq 0 ]] && command -v yum >/dev/null 2>&1 && \
+   [[ "${KCAT_INSTALL_BUILD_DEPS:-1}" == "1" ]]; then
+    echo "== Installing build prerequisites (wget, perl modules) =="
+    yum install -y wget perl-IPC-Cmd perl-Data-Dumper perl-core >/dev/null
+fi
+
 echo "== Building self-contained librdkafka $LIBRDKAFKA_VERSION =="
 
 # 1. librdkafka, statically linked with its dependencies built from source.
@@ -39,9 +48,15 @@ fi
 
 pushd "$WORK/librdkafka" >/dev/null
 if [[ ! -f config.h ]]; then
+    # curl (OIDC) and cyrus libsasl2 (GSSAPI) are intentionally disabled: they
+    # are not in the Windows build's feature set, and dropping them avoids two
+    # extra source dependencies. Builtin SASL (PLAIN/SCRAM/OAUTHBEARER) and the
+    # 'sasl' feature remain. That leaves openssl/zstd/zlib as the only
+    # source-built static deps, plus librdkafka's bundled snappy and lz4.
     ./configure --prefix="$DEST" \
         --install-deps --source-deps-only \
-        --enable-static --disable-lz4-ext
+        --enable-static --disable-lz4-ext \
+        --disable-curl --disable-sasl
 fi
 make -j"$JOBS"
 make install
