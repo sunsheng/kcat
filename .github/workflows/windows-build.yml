@@ -58,9 +58,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
           $vcpkg = Join-Path $env:VCPKG_INSTALLATION_ROOT 'vcpkg.exe'
-          & $vcpkg install `
-            "librdkafka[core,ssl,zlib,zstd]:$env:VCPKG_TRIPLET" `
-            "pkgconf:$env:VCPKG_TRIPLET"
+          & $vcpkg install "librdkafka[core,ssl,zlib,zstd]:$env:VCPKG_TRIPLET"
           if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed ($LASTEXITCODE)" }
 
       - name: Save vcpkg cache
@@ -70,59 +68,46 @@ jobs:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
           key: vcpkg-${{ env.VCPKG_TRIPLET }}-librdkafka-ssl-zlib-zstd-v1
 
-      # Derive the complete transitive static link line (librdkafka + openssl +
-      # zlib + zstd + all Win32 system libs). Prefer librdkafka's pkg-config file
-      # (authoritative for the exact dependency set); fall back to linking every
-      # static lib vcpkg produced plus the Win32 system libs OpenSSL/librdkafka
-      # need, so the build is resilient to pkg-config naming/layout changes.
+      # Build the static link line by listing every static lib vcpkg produced
+      # (librdkafka + openssl + zlib + zstd + lz4) plus the Win32 system libs
+      # OpenSSL/librdkafka need. The values are handed to MSBuild through a
+      # generated .props file (imported by the vcxproj) rather than /p: switches,
+      # because the semicolon-separated lib list would otherwise be parsed by
+      # MSBuild as multiple property definitions (MSB1006).
       - name: Compute static link flags
-        id: link
         shell: pwsh
         run: |
-          $PSNativeCommandUseErrorActionPreference = $false
           $inst   = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed\$env:VCPKG_TRIPLET"
           $libdir = Join-Path $inst 'lib'
           $incdir = Join-Path $inst 'include'
-          $pcdir  = Join-Path $libdir 'pkgconfig'
 
           Write-Host "== .lib files in $libdir =="
           Get-ChildItem $libdir -Filter *.lib -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
-          Write-Host "== .pc files in $pcdir =="
-          if (Test-Path $pcdir) { Get-ChildItem $pcdir -Filter *.pc | Select-Object -ExpandProperty Name } else { Write-Host "(no pkgconfig dir)" }
 
-          $libs = $null
-          $pkgconf = Get-ChildItem (Join-Path $inst 'tools') -Filter pkgconf.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          $pc = $null
-          if (Test-Path $pcdir) {
-            $pc = Get-ChildItem $pcdir -Filter '*.pc' |
-              Where-Object { $_.BaseName -match 'rdkafka' -and $_.BaseName -notmatch '\+\+|cpp' } |
-              Select-Object -First 1
-          }
-          if ($pkgconf -and $pc) {
-            $env:PKG_CONFIG_PATH = $pcdir
-            Write-Host "Resolving via pkgconf module '$($pc.BaseName)'"
-            $raw = & $pkgconf.FullName --msvc-syntax --static --libs-only-l $pc.BaseName 2>&1
-            if ($LASTEXITCODE -eq 0 -and $raw) {
-              $libs = (($raw -split '\s+') | Where-Object { $_ -match '\.lib$' } | Select-Object -Unique) -join ';'
-            } else {
-              Write-Host "pkgconf did not resolve cleanly: $raw"
-            }
-          }
-          if (-not $libs) {
-            Write-Host "Falling back to globbed libs + Win32 system libs"
-            $vlibs = Get-ChildItem $libdir -Filter *.lib -ErrorAction SilentlyContinue |
-              Where-Object { $_.BaseName -notmatch '\+\+|cpp' } | Select-Object -ExpandProperty Name
-            $syslibs = @('ws2_32.lib','crypt32.lib','secur32.lib','bcrypt.lib','ncrypt.lib',
-                         'advapi32.lib','user32.lib','gdi32.lib','shell32.lib','ole32.lib',
-                         'dnsapi.lib','iphlpapi.lib','normaliz.lib')
-            $libs = (($vlibs + $syslibs) | Select-Object -Unique) -join ';'
-          }
-          if (-not $libs) { throw "Could not determine static link libraries" }
+          $vlibs = Get-ChildItem $libdir -Filter *.lib -ErrorAction SilentlyContinue |
+            Where-Object { $_.BaseName -notmatch '\+\+|cpp|pkgconf' } |
+            Select-Object -ExpandProperty Name
+          if (-not $vlibs) { throw "No static libraries found in $libdir" }
 
+          $syslibs = @('ws2_32.lib','crypt32.lib','secur32.lib','bcrypt.lib','ncrypt.lib',
+                       'advapi32.lib','user32.lib','gdi32.lib','shell32.lib','ole32.lib',
+                       'dnsapi.lib','iphlpapi.lib','normaliz.lib')
+          $libs = (($vlibs + $syslibs) | Select-Object -Unique) -join ';'
           Write-Host "Static libraries: $libs"
-          "libs=$libs"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "libdir=$libdir" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "incdir=$incdir" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+          $props = @"
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <KcatRdkafkaInclude>$incdir</KcatRdkafkaInclude>
+    <KcatRdkafkaLibDirs>$libdir</KcatRdkafkaLibDirs>
+    <KcatRdkafkaLibs>$libs</KcatRdkafkaLibs>
+  </PropertyGroup>
+</Project>
+"@
+          $propsPath = Join-Path $env:GITHUB_WORKSPACE 'win32\kcat.link.props'
+          Set-Content -Path $propsPath -Value $props -Encoding UTF8
+          Write-Host "Wrote $propsPath"
+          Get-Content $propsPath
 
       - name: Build static kcat.exe
         shell: pwsh
@@ -132,10 +117,7 @@ jobs:
             /p:Configuration=$env:CONFIGURATION `
             /p:Platform=$env:PLATFORM `
             /p:PlatformToolset=v143 `
-            /p:PreferredToolArchitecture=x64 `
-            /p:KcatRdkafkaInclude="${{ steps.link.outputs.incdir }}" `
-            /p:KcatRdkafkaLibDirs="${{ steps.link.outputs.libdir }}" `
-            /p:KcatRdkafkaLibs="${{ steps.link.outputs.libs }}"
+            /p:PreferredToolArchitecture=x64
           if ($LASTEXITCODE -ne 0) { throw "msbuild failed ($LASTEXITCODE)" }
 
       - name: Stage payload
