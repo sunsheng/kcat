@@ -57,8 +57,27 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+
+          # The upstream librdkafka port exposes no 'snappy' feature, and its CMake
+          # build leaves WITH_SNAPPY off by default (so vcpkg builds drop Snappy
+          # compression). Snappy is bundled in librdkafka's sources with no extra
+          # dependency, so enable it via an overlay port that copies the runner's
+          # exact port and injects -DWITH_SNAPPY=ON.
+          $overlay = Join-Path $env:GITHUB_WORKSPACE 'vcpkg-overlay'
+          $portDst = Join-Path $overlay 'librdkafka'
+          New-Item -ItemType Directory -Force -Path $portDst | Out-Null
+          Copy-Item -Path (Join-Path $env:VCPKG_INSTALLATION_ROOT 'ports\librdkafka\*') -Destination $portDst -Recurse -Force
+
+          $pf = Join-Path $portDst 'portfile.cmake'
+          $c = Get-Content $pf -Raw
+          $c = $c -replace '-DWITH_BUNDLED_SSL=OFF', "-DWITH_BUNDLED_SSL=OFF`n        -DWITH_SNAPPY=ON"
+          Set-Content -Path $pf -Value $c -Encoding UTF8
+          if ((Get-Content $pf -Raw) -notmatch 'WITH_SNAPPY=ON') {
+            throw "Failed to inject -DWITH_SNAPPY=ON into overlay portfile"
+          }
+
           $vcpkg = Join-Path $env:VCPKG_INSTALLATION_ROOT 'vcpkg.exe'
-          & $vcpkg install "librdkafka[core,ssl,zlib,zstd,snappy]:$env:VCPKG_TRIPLET"
+          & $vcpkg install "librdkafka[core,ssl,zlib,zstd]:$env:VCPKG_TRIPLET" "--overlay-ports=$overlay"
           if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed ($LASTEXITCODE)" }
 
       - name: Save vcpkg cache
@@ -150,6 +169,14 @@ jobs:
             }
             Write-Host "Dependency check passed: no librdkafka runtime DLLs imported."
           }
+
+          # Smoke test + feature check: the exe must run standalone and report
+          # snappy among librdkafka's builtin features.
+          $ver = & $exe.FullName -V
+          Write-Host $ver
+          if ($LASTEXITCODE -ne 0) { throw "kcat.exe -V failed ($LASTEXITCODE)" }
+          if ("$ver" -notmatch 'snappy') { throw "kcat.exe -V does not report snappy support" }
+          Write-Host "Feature check passed: snappy present."
 
           # License kept for redistribution compliance.
           Copy-Item -Path LICENSE -Destination $stage -Force
