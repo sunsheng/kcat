@@ -1,0 +1,83 @@
+name: ARMv7 musl Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Cross-build static kcat (linux-armv7 / musl)
+    runs-on: ubuntu-latest
+
+    env:
+      LIBRDKAFKA_VERSION: v1.8.2
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            version="${{ github.ref_name }}"
+            version="${version#v}"
+          else
+            version="0.0.0-ci.${{ github.run_number }}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tarball=kcat-$version-linux-armv7-musl.tar.gz" >> "$GITHUB_OUTPUT"
+
+      # Cache the cross-compiled dependency build (librdkafka + yajl), which is
+      # the slow part. The build dir uses a fixed in-container path (/work), so
+      # its pkg-config/.a paths stay valid across runs.
+      - name: Cache dependency build
+        uses: actions/cache@v4
+        with:
+          path: tmp-armv7-build
+          key: armv7-musl-${{ env.LIBRDKAFKA_VERSION }}-${{ hashFiles('packaging/armv7-musl/build-static.sh') }}
+
+      # Cross-compile inside the dockcross armv7l-musl image, which provides the
+      # musl hard-float toolchain via $CC/$CROSS_TRIPLE/$CMAKE_TOOLCHAIN_FILE.
+      - name: Cross-build static kcat
+        run: |
+          docker run --rm \
+            -v "$PWD":/work -w /work \
+            -e LIBRDKAFKA_VERSION="$LIBRDKAFKA_VERSION" \
+            dockcross/linux-armv7l-musl \
+            bash packaging/armv7-musl/build-static.sh
+          # The container runs as root; reclaim ownership so later host-side
+          # steps (staging, caching) can read/write the outputs.
+          sudo chown -R "$(id -u):$(id -g)" .
+
+      - name: Stage payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="artifacts/stage"
+          mkdir -p "$stage"
+          cp kcat "$stage/"
+          cp LICENSE "$stage/"
+          chmod +x "$stage/kcat"
+          ls -l "$stage"
+          mkdir -p artifacts
+          tar -C "$stage" -czf "artifacts/${{ steps.version.outputs.tarball }}" kcat LICENSE
+          ls -l artifacts
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: kcat-linux-armv7-musl-${{ steps.version.outputs.version }}
+          path: artifacts/${{ steps.version.outputs.tarball }}
+
+      - name: Publish to GitHub Release
+        if: ${{ github.ref_type == 'tag' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/${{ steps.version.outputs.tarball }}

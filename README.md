@@ -102,6 +102,27 @@ On Ubuntu or Debian: `sudo apt-get install librdkafka-dev libyajl-dev`
     make
     sudo make install
 
+### Cross-build for ARMv7 (musl)
+
+A fully static `kcat` for ARMv7 (armhf) musl systems can be cross-compiled with
+the [dockcross](https://github.com/dockcross/dockcross)
+`linux-armv7l-musl` toolchain image. The resulting binary is statically linked
+against musl libc, librdkafka and yajl (JSON), so it has no runtime
+dependencies. TLS (OpenSSL) and SASL are disabled, so it only talks to
+`PLAINTEXT` brokers.
+
+    docker run --rm -v "$PWD":/work -w /work \
+        dockcross/linux-armv7l-musl \
+        bash packaging/armv7-musl/build-static.sh
+
+The build script lives at `packaging/armv7-musl/build-static.sh`. Override the
+librdkafka version with the `LIBRDKAFKA_VERSION` environment variable.
+
+The `.github/workflows/armv7-musl-build.yml` workflow runs this build on
+GitHub Actions; it can be triggered manually or by pushing a `v*` tag. Each run
+uploads the binary as a workflow artifact, and tagged runs also publish a
+`kcat-<version>-linux-armv7-musl.tar.gz` asset to the GitHub Release.
+
 ### Build for Windows
 
     cd win32
